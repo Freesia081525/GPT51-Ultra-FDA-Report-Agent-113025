@@ -540,26 +540,30 @@ def pipeline_tab():
 
     run_all = st.button("🚀 Run Full Pipeline (sequential chaining)", type="primary")
 
-    # ---- FULL PIPELINE EXECUTION (chained, using current editable state) ----
+    # ==============================
+    # FULL PIPELINE EXECUTION
+    # ==============================
     if run_all:
         if st.session_state.app_state.mana < 20:
             st.error("Not enough Mana to start the pipeline (need at least 20).")
             return
 
         st.session_state.execution_log.append(
-            {"time": time.strftime("%H:%M:%S"), "type": "info", "msg": "Full pipeline execution started."}
+            {
+                "time": time.strftime("%H:%M:%S"),
+                "type": "info",
+                "msg": "Full pipeline execution started.",
+            }
         )
 
-        current = global_input or ""
         for idx, a in enumerate(agents):
-            # Refresh config from UI (we'll read controls later when rendering cards)
+            # Refresh config from UI if already set
             provider_key = f"provider_{a.id}"
             model_key = f"model_{a.id}"
             temp_key = f"temp_{a.id}"
             max_tokens_key = f"max_tokens_{a.id}"
             sys_key = f"system_prompt_{a.id}"
 
-            # If user already changed config this session, use those values
             if provider_key in st.session_state:
                 a.provider = st.session_state[provider_key]
             if model_key in st.session_state:
@@ -571,25 +575,29 @@ def pipeline_tab():
             if sys_key in st.session_state:
                 a.system_prompt = st.session_state[sys_key]
 
-            # Determine input for this step:
-            # 1) if user explicitly edited input for this agent → use that
-            # 2) else use previous step output (or global input for first step)
-            if a.id in st.session_state.pipeline_inputs:
-                step_input = st.session_state.pipeline_inputs[a.id]
+            # Determine input for this agent in full pipeline mode:
+            if idx == 0:
+                # Step 1 always uses the latest Global Case Input
+                step_input = global_input or ""
             else:
-                if idx == 0:
-                    step_input = current
-                else:
-                    prev_id = agents[idx - 1].id
-                    step_input = st.session_state.pipeline_results.get(prev_id, current)
+                # Steps 2..N use the latest edited output of the previous agent, if available
+                prev_agent = agents[idx - 1]
+                prev_id = prev_agent.id
+                prev_output_key = f"output_{prev_id}"
 
-            st.session_state.pipeline_inputs[a.id] = step_input
+                if prev_output_key in st.session_state and str(st.session_state[prev_output_key]).strip():
+                    step_input = st.session_state[prev_output_key]
+                else:
+                    step_input = st.session_state.pipeline_results.get(prev_id, "")
 
             with st.spinner(f"Running Agent {idx+1}: {a.name}…"):
                 try:
                     result = run_agent(a, step_input or "")
+                    # Store raw result
                     st.session_state.pipeline_results[a.id] = result
-                    current = result
+                    # Also sync to UI output field so user sees the latest
+                    st.session_state[f"output_{a.id}"] = result
+
                     st.session_state.execution_log.append(
                         {
                             "time": time.strftime("%H:%M:%S"),
@@ -608,7 +616,10 @@ def pipeline_tab():
                     st.error(f"Agent {a.name} failed: {e}")
                     break
 
-    # ---- PER-AGENT CONFIG + STEP-BY-STEP EXECUTION ----
+    # ==============================
+    # PER-AGENT CONFIG + STEP RUN
+    # ==============================
+
     st.markdown("### 📄 Per-Agent Configuration & Editable Chain")
 
     prev_agent_id = None
@@ -666,24 +677,31 @@ def pipeline_tab():
             st.markdown("---")
 
             # --- Input to this agent (editable) ---
-            # Default logic:
-            #   Step 1 → from global input
-            #   Step N → from previous agent's output (latest edited), unless user already set a custom input
-            if a.id in st.session_state.pipeline_inputs:
-                default_input = st.session_state.pipeline_inputs[a.id]
+            input_key = f"input_{a.id}"
+
+            if input_key in st.session_state:
+                # If user has already typed something here, keep that
+                default_input = st.session_state[input_key]
             else:
+                # First time this step is rendered -> compute default
                 if idx == 0:
+                    # Step 1 default = Global Case Input
                     default_input = global_input
                 else:
-                    default_input = st.session_state.pipeline_results.get(prev_agent_id, "")
+                    # Step N default = latest edited output of previous agent, if exists
+                    prev_id = prev_agent_id
+                    prev_output_key = f"output_{prev_id}"
+                    if prev_output_key in st.session_state and str(st.session_state[prev_output_key]).strip():
+                        default_input = st.session_state[prev_output_key]
+                    else:
+                        default_input = st.session_state.pipeline_results.get(prev_id, "")
 
             input_text = st.text_area(
                 "Input to this agent (你可以在這裡修改，作為下一步代理的輸入)",
                 value=default_input,
                 height=180,
-                key=f"input_{a.id}",
+                key=input_key,
             )
-            st.session_state.pipeline_inputs[a.id] = input_text
 
             # --- Run this step only ---
             run_step = st.button(f"▶️ Run only this step: {a.name}", key=f"run_step_{a.id}")
@@ -696,6 +714,7 @@ def pipeline_tab():
                         try:
                             result = run_agent(a, input_text or "")
                             st.session_state.pipeline_results[a.id] = result
+                            st.session_state[f"output_{a.id}"] = result
                             st.session_state.execution_log.append(
                                 {
                                     "time": time.strftime("%H:%M:%S"),
@@ -728,14 +747,19 @@ def pipeline_tab():
                 )
                 st.session_state.pipeline_view_modes[a.id] = view_mode
 
+                output_key = f"output_{a.id}"
+                # Initialize UI output field with latest pipeline result, if not already set
+                if output_key not in st.session_state:
+                    st.session_state[output_key] = st.session_state.pipeline_results[a.id]
+
                 if view_mode == "Edit (Text)":
                     edited_output = st.text_area(
                         "Editable Output (修改後將作為後續步驟的潛在輸入來源)",
-                        value=st.session_state.pipeline_results[a.id],
+                        value=st.session_state[output_key],
                         height=220,
-                        key=f"output_{a.id}",
+                        key=output_key,
                     )
-                    # Store edited version
+                    # Keep pipeline_results in sync with edited output
                     st.session_state.pipeline_results[a.id] = edited_output
                 else:
                     st.markdown(
@@ -748,7 +772,6 @@ def pipeline_tab():
                 )
 
         prev_agent_id = a.id
-
 # =========================
 # 9. NOTE KEEPER
 # =========================
